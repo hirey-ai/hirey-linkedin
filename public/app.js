@@ -99,11 +99,22 @@ function gateWrite(retry) {
   return true;
 }
 
-function onLoginSuccess(res, onDone) {
-  SESSION = { logged_in: true, identity: { email: res.email || null, workspace_id: res.workspace_id || null } };
+async function loginPost(path, body) {
+  const r = await fetch(api('api/login/' + path), {
+    method: 'POST', credentials: 'same-origin',
+    headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}),
+  });
+  return r.json();
+}
+
+async function afterLogin(onDone) {
+  SESSION = { logged_in: true, identity: null };
   closeModal();
-  toast(res.joined_existing_workspace ? 'Welcome back — your workspace is restored' : 'Signed in to Hi');
-  loadMe().finally(() => { route(); if (typeof onDone === 'function') onDone(); });
+  toast('Signed in to Hi');
+  await loadMe().catch(() => {});
+  SESSION.identity = { email: ME?.bound_identities?.email || null, workspace_id: ME?.workspace_id || null };
+  route();
+  if (typeof onDone === 'function') onDone();
 }
 
 function openLogin(onDone) {
@@ -134,8 +145,9 @@ function googlePane(c, onDone) {
   $('#g-go', c).onclick = async () => {
     const st = $('#g-status', c); st.textContent = 'Opening Google…';
     let r;
-    try { r = await hi('hi.google-link', 'start'); } catch (e) { st.textContent = 'Could not start: ' + e.message; return; }
-    const url = safeUrl(r.verification_url);
+    try { r = await loginPost('google/start', {}); } catch (e) { st.textContent = 'Could not start: ' + e.message; return; }
+    if (!r.ok || !r.authorize_url) { st.textContent = 'Sign-in is unavailable right now.'; return; }
+    const url = safeUrl(r.authorize_url);
     if (url === '#') { st.textContent = 'Got an invalid sign-in URL — try again.'; return; }
     const w = window.open(url, 'hi-google', 'noopener,noreferrer,width=500,height=680');
     st.innerHTML = `A Google window opened — approve there and you'll be signed in automatically.<br>
@@ -143,9 +155,9 @@ function googlePane(c, onDone) {
     let tries = 0;
     const iv = setInterval(async () => {
       tries++;
-      let res; try { res = await hi('hi.google-link', 'poll'); } catch { res = {}; }
-      if (res && res.status === 'verified') { clearInterval(iv); try { w && w.close(); } catch {} onLoginSuccess(res, onDone); }
-      else if (tries > 72) { clearInterval(iv); st.textContent = 'Timed out — click “Continue with Google” to try again.'; }
+      let res; try { res = await loginPost('google/poll', {}); } catch { res = {}; }
+      if (res && res.status === 'verified') { clearInterval(iv); try { w && w.close(); } catch {} afterLogin(onDone); }
+      else if (tries > 80) { clearInterval(iv); st.textContent = 'Timed out — click “Continue with Google” to try again.'; }
     }, 2500);
   };
 }
@@ -166,25 +178,25 @@ function otpPane(c, onDone, opts) {
     if (!val) return (st.textContent = `Enter your ${opts.kind}.`);
     st.textContent = 'Sending code…';
     try {
-      await hi(opts.cap, 'bind', { [opts.field]: val });
+      const r = await loginPost(`${opts.kind}/start`, { [opts.field]: val });
+      if (!r.ok) { st.textContent = r.error === 'rate_limited' ? 'Too many attempts — wait a minute.' : `Couldn’t send a code — check your ${opts.kind}.`; return; }
       $('#otp-step2', c).hidden = false;
       st.textContent = `We sent a 6-digit code to ${val}. Enter it above.`;
     } catch (e) { st.textContent = 'Could not send: ' + e.message; }
   };
   $('#otp-verify', c).onclick = async () => {
-    const val = $('#otp-id', c).value.trim();
     const code = $('#otp-code', c).value.trim();
     if (!/^\d{4,8}$/.test(code)) return (st.textContent = 'Enter the code from your ' + opts.kind + '.');
     st.textContent = 'Verifying…';
     try {
-      const res = await hi(opts.cap, 'verify', { [opts.field]: val, code });
-      if (res.workspace_id) onLoginSuccess(res, onDone);
+      const r = await loginPost(`${opts.kind}/verify`, { code });
+      if (r.ok && r.logged_in) afterLogin(onDone);
       else st.textContent = 'That code didn’t work — try again.';
     } catch (e) { st.textContent = 'Verification failed: ' + e.message; }
   };
 }
-const emailPane = (c, onDone) => otpPane(c, onDone, { kind: 'email', cap: 'hi.email-binding', field: 'email', type: 'email', placeholder: 'you@email.com', label: 'Email me a code' });
-const phonePane = (c, onDone) => otpPane(c, onDone, { kind: 'phone', cap: 'hi.phone-binding', field: 'phone_e164', type: 'tel', placeholder: '+1 415 555 0152', label: 'Text me a code' });
+const emailPane = (c, onDone) => otpPane(c, onDone, { kind: 'email', field: 'email', type: 'email', placeholder: 'you@email.com', label: 'Email me a code' });
+const phonePane = (c, onDone) => otpPane(c, onDone, { kind: 'phone', field: 'phone', type: 'tel', placeholder: '+1 415 555 0152', label: 'Text me a code' });
 
 // Shown on Me / Messaging when browsing anonymously in the hosted app.
 function renderSignInPrompt(what) {
