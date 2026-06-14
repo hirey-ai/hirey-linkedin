@@ -4,6 +4,12 @@
 const app = document.getElementById('app');
 const $ = (s, r = document) => r.querySelector(s);
 
+// Mount point: the app may be served at "/" (local) or under "/{id}/demo/" (hosted). Routing is
+// hash-based, so location.pathname is a stable base. Build all API URLs relative to it.
+const MOUNT = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
+const api = (p) => MOUNT + p;
+let HOSTED = false; // learned from /api/health; in hosted mode we don't auto-create an identity
+
 // ---------------------------------------------------------------- tiny utils
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -42,7 +48,8 @@ function titleCase(s) {
 
 // ---------------------------------------------------------------- Hi proxy
 async function hi(capability, action, params = {}) {
-  const r = await fetch('/api/call', {
+  const r = await fetch(api('api/call'), {
+    credentials: 'same-origin',
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ capability, action, params }),
@@ -52,7 +59,7 @@ async function hi(capability, action, params = {}) {
   return j.result ?? j;
 }
 async function getFeed(limit = 24) {
-  const r = await fetch(`/api/feed?limit=${limit}`);
+  const r = await fetch(api(`api/feed?limit=${limit}`));
   const j = await r.json();
   return j.posts || [];
 }
@@ -495,4 +502,11 @@ document.getElementById('nav-search').addEventListener('submit', (e) => {
 });
 
 window.addEventListener('hashchange', route);
-loadMe().finally(route);
+
+// Boot: learn the mode. In hosted (multi-tenant) mode we do NOT auto-resolve an identity —
+// a per-session agent is provisioned lazily only when the visitor acts (Me / Messaging / write).
+(async () => {
+  try { HOSTED = (await (await fetch(api('api/health'))).json()).hosted === true; } catch { /* default local */ }
+  if (!HOSTED) await loadMe().catch(() => {});
+  route();
+})();
