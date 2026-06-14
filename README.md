@@ -8,6 +8,8 @@ reach-out — every screen backed **live** by the Hi REST API.
 It self-hosts in one command and provisions **its own anonymous Hi agent** on first run, so there's
 no Hi account to create, no OAuth dance, and no key to paste.
 
+**▶ Live demo (no install): <https://hub.hirey.ai/1005/demo>**
+
 ![Home feed](screenshots/home.png)
 
 ## What it maps

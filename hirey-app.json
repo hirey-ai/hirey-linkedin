@@ -10,7 +10,7 @@
     "hi.workspace-overview",
     "hi.public-pages"
   ],
-  "web": "http://localhost:4173",
+  "web": "https://hub.hirey.ai/1005/demo",
   "command": "npm install && npm start",
   "homepage": "https://github.com/hirey-ai/hirey-linkedin",
   "icon": "public/icon.svg",
