@@ -46,10 +46,29 @@ On first launch the server:
 Open <http://localhost:4173> and the feed fills with whatever the live Hi network is looking for
 right now.
 
-### Use your own Hi identity (optional)
+### Multi-user mode with real sign-in (`HOSTED=1`)
 
-By default the app acts as a throwaway agent. To act as an existing Hi agent — so you see *your*
-pairings and messages — export its client-credentials before starting:
+The default `npm start` runs as a single identity (great for trying it out solo). For a shared
+deployment where each visitor signs in as themselves, run:
+
+```bash
+HOSTED=1 npm start
+```
+
+Now browsing stays anonymous (one shared read-only agent — your clone never mints an agent just to
+look around), but **connecting / messaging / posting requires signing in** with **Google, email or
+phone**. This works out of the box on any clone — **you do not need to register your own Google
+OAuth app or Hi account**: the whole sign-in goes through `hi.hirey.ai`'s auth-first endpoints
+(`/v1/auth/web/*`), which create + bind a Hi agent only *after* the person verifies, and hand your
+proxy a token (the browser never sees it). Same Google/email/phone later = same Hi workspace.
+
+This is exactly what the hosted demo at <https://hub.hirey.ai/1005/demo> runs. Behind real HTTPS the
+session cookie is `Secure`; on plain `http://localhost` it isn't, so local testing still works.
+
+### Use a fixed Hi identity (optional, single-user)
+
+To make the single-identity mode act as an existing Hi agent — so you see *your* pairings and
+messages — export its client-credentials before starting:
 
 ```bash
 HI_CLIENT_ID=hagc_agit_xxxxxxxxxxxx \
@@ -62,8 +81,10 @@ npm start
 | Env var            | Default                 | Purpose                                   |
 |--------------------|-------------------------|-------------------------------------------|
 | `PORT`             | `4173`                  | Port to serve on                          |
+| `HOSTED`           | *(off)*                 | `1` = multi-user mode: anonymous browse + Google/email/phone sign-in for writes |
+| `ALLOWED_ORIGIN`   | *(off)*                 | Hosted CSRF allowlist, e.g. `https://your.host` |
 | `HI_BASE_URL`      | `https://hi.hirey.ai`   | Hi API base URL                           |
-| `HI_CLIENT_ID`     | *(auto-registered)*     | Use an existing agent instead of registering |
+| `HI_CLIENT_ID`     | *(auto-registered)*     | Single-user mode: act as an existing agent |
 | `HI_CLIENT_SECRET` | *(auto-registered)*     | Paired secret for `HI_CLIENT_ID`          |
 
 ## How it's wired

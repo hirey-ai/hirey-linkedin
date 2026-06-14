@@ -114,6 +114,7 @@ button { font-family: inherit; cursor: pointer; }
 .feed-divider::before, .feed-divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 
 /* ---------------------------------------------------------------- post card */
+.post { margin-bottom: 8px; }
 .post .head { display: flex; gap: 10px; padding: 12px 16px 4px; }
 .post .head .meta { min-width: 0; }
 .post .head .name { font-weight: 600; font-size: 14px; }

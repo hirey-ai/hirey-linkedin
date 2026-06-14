@@ -95,7 +95,10 @@ const SESSION_TTL = 30 * 24 * 60 * 60 * 1000; // 30d
 const MAX_SESSIONS = 50000;
 const SID_RE = /^[a-f0-9]{32}$/;
 const newSid = () => randomBytes(16).toString('hex');
-const sessionCookie = (sid) => `hl_sid=${sid}; Path=/; HttpOnly;${HOSTED ? ' Secure;' : ''} SameSite=Lax; Max-Age=${SESSION_TTL / 1000}`;
+// Secure only over real HTTPS (behind CloudFront/nginx X-Forwarded-Proto), so a self-hosted clone
+// on http://localhost still keeps its session — otherwise the browser drops a Secure cookie on http.
+const reqHttps = (req) => req.headers['x-forwarded-proto'] === 'https' || !!req.socket?.encrypted;
+const sessionCookie = (sid, secure) => `hl_sid=${sid}; Path=/; HttpOnly;${secure ? ' Secure;' : ''} SameSite=Lax; Max-Age=${SESSION_TTL / 1000}`;
 
 function sweepSessions() {
   const now = Date.now();
@@ -107,7 +110,7 @@ function getSession(req) { const sid = parseCookies(req).hl_sid; return sid && S
 function ensureSession(req, setCookie) {
   let sid = parseCookies(req).hl_sid;
   let s = (sid && SID_RE.test(sid)) ? sessions.get(sid) : null;
-  if (!s) { sweepSessions(); sid = newSid(); s = { lastSeen: Date.now() }; sessions.set(sid, s); setCookie(sessionCookie(sid)); }
+  if (!s) { sweepSessions(); sid = newSid(); s = { lastSeen: Date.now() }; sessions.set(sid, s); setCookie(sessionCookie(sid, HOSTED && reqHttps(req))); }
   s.lastSeen = Date.now();
   return { sid, s };
 }
@@ -115,7 +118,7 @@ function rotateSession(req, s, setCookie) {
   // session-fixation defence: at the login (privilege) boundary, move the session to a fresh sid
   const oldSid = parseCookies(req).hl_sid;
   if (oldSid && sessions.get(oldSid) === s) sessions.delete(oldSid);
-  const sid = newSid(); sessions.set(sid, s); setCookie(sessionCookie(sid));
+  const sid = newSid(); sessions.set(sid, s); setCookie(sessionCookie(sid, HOSTED && reqHttps(req)));
 }
 
 // per-IP rate limit on login-start (each start mints a Hi subject + may send an OTP)
