@@ -1,0 +1,25 @@
+{
+  "name": "Hirey LinkedIn",
+  "description": "A LinkedIn-style web front-end for Hirey Hi. Scroll a feed of what people are looking for, discover people you may know, search the whole network, open rich profiles, and reach out — every screen is backed live by the Hi REST API. Self-hosts in one command and provisions its own anonymous Hi agent, so there is no account to create and no key to paste.",
+  "tags": ["web", "linkedin", "social", "frontend", "networking", "people-search", "demo"],
+  "capabilities": [
+    "hi.owners",
+    "hi.agent-listings",
+    "hi.matching-sessions",
+    "hi.pairings",
+    "hi.workspace-overview",
+    "hi.public-pages"
+  ],
+  "web": "http://localhost:4173",
+  "command": "npm install && npm start",
+  "homepage": "https://github.com/hirey-ai/hirey-linkedin",
+  "icon": "public/icon.svg",
+  "screenshots": [
+    "screenshots/home.png",
+    "screenshots/network.png",
+    "screenshots/profile.png",
+    "screenshots/search.png"
+  ],
+  "license": "MIT",
+  "author": "Hirey"
+}

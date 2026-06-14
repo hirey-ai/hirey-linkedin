@@ -1,0 +1,30 @@
+{
+  "name": "hirey-linkedin",
+  "version": "1.0.0",
+  "description": "A LinkedIn-style web front-end for Hirey Hi — feed, people-you-may-know, search, profiles and reach-out, all powered live by the Hi REST API.",
+  "type": "module",
+  "bin": {
+    "hirey-linkedin": "server.mjs"
+  },
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "hirey",
+    "hi",
+    "linkedin",
+    "networking",
+    "people-search",
+    "hub"
+  ],
+  "license": "MIT",
+  "author": "Hirey",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hirey-ai/hirey-linkedin.git"
+  },
+  "homepage": "https://github.com/hirey-ai/hirey-linkedin#readme"
+}
