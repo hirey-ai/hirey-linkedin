@@ -24,6 +24,7 @@ const PUBLIC_DIR = join(__dirname, 'public');
 const HI_BASE = (process.env.HI_BASE_URL || 'https://hi.hirey.ai').replace(/\/+$/, '');
 const PORT = Number(process.env.PORT || 4173);
 const HOSTED = process.env.HOSTED === '1';
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || ''; // e.g. https://hub.hirey.ai (hosted CSRF allowlist)
 const CREDS_DIR = join(homedir(), '.config', 'hirey-linkedin');
 const CREDS_PATH = join(CREDS_DIR, 'credentials.json');
 
@@ -40,14 +41,35 @@ const WRITE = new Set([
   'hi.workspace-overview:get',
   'hi.pairings:list', 'hi.pairings:timeline', 'hi.pairings:create',
   'hi.pairings:contact_owner', 'hi.pairings:contact_target',
+  // login / identity binding — turns the anonymous session agent into a recoverable identity
+  'hi.phone-binding:bind', 'hi.phone-binding:verify',
+  'hi.email-binding:bind', 'hi.email-binding:verify',
+  'hi.google-link:start', 'hi.google-link:poll',
 ]);
+
+// A successful bind/verify (or google poll → verified) means this session is now signed in.
+function detectLogin(capability, action, params, result) {
+  if (!result) return null;
+  const verified =
+    ((capability === 'hi.phone-binding' || capability === 'hi.email-binding') && action === 'verify' && result.workspace_id) ||
+    (capability === 'hi.google-link' && action === 'poll' && result.status === 'verified');
+  if (!verified) return null;
+  // Only surface what Hi actually verified — never echo client-supplied params as "identity".
+  return {
+    workspace_id: result.workspace_id || null,
+    email: result.email || null,
+    phone: result.phone_e164 || null,
+    joined_existing: result.joined_existing_workspace ?? null,
+    agents_in_workspace: result.agents_in_workspace ?? null,
+  };
+}
 const isAllowed = (cap, action) => READ.has(`${cap}:${action}`) || WRITE.has(`${cap}:${action}`);
 const isRead = (cap, action) => READ.has(`${cap}:${action}`);
 
 // ----------------------------------------------------------------------------- identity
 // An AgentCtx holds one Hi agent's credentials + a cached access token.
 class AgentCtx {
-  constructor(creds) { this.creds = creds; this.token = { value: null, exp: 0 }; this.lastSeen = Date.now(); }
+  constructor(creds) { this.creds = creds; this.token = { value: null, exp: 0 }; this.lastSeen = Date.now(); this.bound = false; this.identity = null; }
   async getToken() {
     const now = Date.now();
     if (this.token.value && this.token.exp - now > 60_000) return this.token.value;
@@ -119,6 +141,9 @@ let serviceCtx = null;
 const sessions = new Map();
 const SESSION_TTL = 2 * 60 * 60 * 1000; // 2h idle
 const MAX_SESSIONS = 2000;
+const SID_RE = /^[a-f0-9]{32}$/;
+const newSid = () => randomBytes(16).toString('hex');
+const sessionCookie = (sid) => `hl_sid=${sid}; Path=/; HttpOnly;${HOSTED ? ' Secure;' : ''} SameSite=Lax; Max-Age=${SESSION_TTL / 1000}`;
 
 function sweepSessions() {
   const now = Date.now();
@@ -136,24 +161,37 @@ function parseCookies(req) {
   return out;
 }
 
-// Resolve which agent handles this call; may set a session cookie via `setCookie`.
+// ---- abuse control: per-IP token buckets (anonymous clients can mint Hi agents + send OTPs) ----
+const buckets = new Map(); // ip -> { mint:[ts], otp:[ts] }
+function clientIp(req) { return (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown'; }
+function rateOk(ip, bucket, max, windowMs) {
+  const now = Date.now();
+  if (buckets.size > 5000) buckets.clear(); // crude bound; resets counters, acceptable for a demo
+  let e = buckets.get(ip); if (!e) { e = {}; buckets.set(ip, e); }
+  const arr = (e[bucket] = (e[bucket] || []).filter((t) => now - t < windowMs));
+  if (arr.length >= max) return false;
+  arr.push(now); return true;
+}
+
+// Resolve which agent handles this call. Reads use the shared service agent; writes use a
+// per-session agent keyed by a SERVER-MINTED sid. A client-supplied sid is honoured only if it
+// already maps to a live session — an unknown value is never adopted (anti session-fixation).
+// Returns { ctx, sid } so the caller can rotate the sid at the login (privilege) boundary.
 async function ctxFor(req, capability, action, setCookie) {
-  if (!HOSTED || isRead(capability, action)) { serviceCtx.lastSeen = Date.now(); return serviceCtx; }
-  // per-session agent
-  let sid = parseCookies(req).hl_sid;
-  if (!sid || !/^[a-f0-9]{32}$/.test(sid)) {
-    sid = randomBytes(16).toString('hex');
-    setCookie(`hl_sid=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL / 1000}`);
-  }
-  let ctx = sessions.get(sid);
+  if (!HOSTED || isRead(capability, action)) { serviceCtx.lastSeen = Date.now(); return { ctx: serviceCtx, sid: null }; }
+  const incoming = parseCookies(req).hl_sid;
+  let sid = (incoming && SID_RE.test(incoming) && sessions.has(incoming)) ? incoming : null;
+  let ctx = sid ? sessions.get(sid) : null;
   if (!ctx) {
     sweepSessions();
+    sid = newSid(); // mint our own; do NOT trust the client's value
     ctx = new AgentCtx(await registerAgent('hirey-linkedin-session', false));
     await activate(ctx);
     sessions.set(sid, ctx);
+    setCookie(sessionCookie(sid));
   }
   ctx.lastSeen = Date.now();
-  return ctx;
+  return { ctx, sid };
 }
 
 // ----------------------------------------------------------------------------- feed
@@ -190,6 +228,15 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, hosted: HOSTED, agent_id: HOSTED ? null : (serviceCtx?.creds?.agent_id || null), hi_base: HI_BASE });
     }
 
+    // passive login-state check (does NOT provision an agent)
+    if (p === '/api/session') {
+      if (!HOSTED) return sendJson(res, 200, { hosted: false, logged_in: true });
+      const sid = parseCookies(req).hl_sid;
+      const ctx = sid ? sessions.get(sid) : null;
+      if (ctx && ctx.bound) { ctx.lastSeen = Date.now(); return sendJson(res, 200, { hosted: true, logged_in: true, identity: ctx.identity }); }
+      return sendJson(res, 200, { hosted: true, logged_in: false });
+    }
+
     if (p === '/api/feed') {
       const limit = Math.min(Number(url.searchParams.get('limit') || 20) || 20, 40);
       return sendJson(res, 200, { ok: true, posts: await buildFeed(limit) });
@@ -197,12 +244,36 @@ const server = createServer(async (req, res) => {
 
     if (p === '/api/call') {
       if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'method_not_allowed' });
+      // CSRF defence-in-depth (on top of the SameSite=Lax cookie): reject a cross-site Origin.
+      // Hosted deployments set ALLOWED_ORIGIN (e.g. https://hub.hirey.ai) so the check doesn't
+      // depend on how the CDN rewrites the Host header; locally it falls back to the request host.
+      const origin = req.headers.origin;
+      if (origin) {
+        let okOrigin;
+        if (ALLOWED_ORIGIN) okOrigin = origin === ALLOWED_ORIGIN;
+        else { try { okOrigin = new URL(origin).host === req.headers.host; } catch { okOrigin = false; } }
+        if (!okOrigin) return sendJson(res, 403, { ok: false, error: 'bad_origin' });
+      }
       let body; try { body = JSON.parse((await readBody(req)) || '{}'); } catch { return sendJson(res, 400, { ok: false, error: 'bad_json' }); }
       const { capability, action } = body; const params = body.params || {};
       if (!isAllowed(capability, action)) return sendJson(res, 403, { ok: false, error: `not allowed: ${capability}.${action}` });
+      if (HOSTED) {
+        const ip = clientIp(req);
+        const inc = parseCookies(req).hl_sid;
+        const willMint = !isRead(capability, action) && !(inc && SID_RE.test(inc) && sessions.has(inc));
+        if (willMint && !rateOk(ip, 'mint', 20, 60_000)) return sendJson(res, 429, { ok: false, error: 'rate_limited' });
+        if (action === 'bind' && (capability === 'hi.email-binding' || capability === 'hi.phone-binding') && !rateOk(ip, 'otp', 5, 600_000))
+          return sendJson(res, 429, { ok: false, error: 'too_many_codes' });
+      }
       let cookie = null;
-      const ctx = await ctxFor(req, capability, action, (c) => { cookie = c; });
+      const { ctx, sid } = await ctxFor(req, capability, action, (c) => { cookie = c; });
       const { status, json } = await ctx.call(capability, action, params);
+      const identity = status === 200 ? detectLogin(capability, action, params, json?.result) : null;
+      if (identity) {
+        ctx.bound = true; ctx.identity = identity;
+        // session-fixation defence: rotate the sid at the login (privilege elevation) boundary
+        if (sid) { const rot = newSid(); sessions.delete(sid); sessions.set(rot, ctx); cookie = sessionCookie(rot); }
+      }
       return sendJson(res, status, json, cookie ? { 'set-cookie': cookie } : undefined);
     }
 
@@ -228,6 +299,17 @@ async function bootstrap() {
   serviceCtx = new AgentCtx(await loadServiceCreds());
   await activate(serviceCtx);
   await serviceCtx.getToken();
+  // Self-heal: agent-scoped reads (peers_feed) need an *activated, materialized* agent. A cached
+  // service agent can lapse (idle-agent cleanup). Probe once; if stale, register a fresh one.
+  try {
+    const probe = await serviceCtx.call('hi.owners', 'peers_feed', { limit: 1 });
+    if (probe.json && probe.json.error === 'missing_caller_agent_id') {
+      console.log('  ↳ cached service agent is stale — registering a fresh one');
+      serviceCtx = new AgentCtx(await registerAgent('hirey-linkedin', true));
+      await activate(serviceCtx);
+      await serviceCtx.getToken();
+    }
+  } catch { /* network hiccup — keep going, /api/feed still works via search */ }
 }
 
 bootstrap()

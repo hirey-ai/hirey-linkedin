@@ -9,10 +9,17 @@ const $ = (s, r = document) => r.querySelector(s);
 const MOUNT = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
 const api = (p) => MOUNT + p;
 let HOSTED = false; // learned from /api/health; in hosted mode we don't auto-create an identity
+let SESSION = { logged_in: false, identity: null }; // hosted login state (browse anon; sign in to write)
 
 // ---------------------------------------------------------------- tiny utils
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// Scheme allow-list for any URL placed into href/src — esc() alone does NOT stop javascript:/data:.
+const safeUrl = (u) => {
+  try { const x = new URL(String(u ?? ''), location.href); return ['http:', 'https:', 'mailto:'].includes(x.protocol) ? x.href : '#'; }
+  catch { return '#'; }
+};
 
 function timeAgo(iso) {
   if (!iso) return '';
@@ -34,7 +41,7 @@ function initials(name) {
   return (parts[0][0] + (parts[1]?.[0] || '')).toUpperCase();
 }
 function avatar(url, name, cls = '') {
-  if (url) return `<img class="avatar ${cls}" src="${esc(url)}" alt="${esc(name)}" referrerpolicy="no-referrer"
+  if (url) return `<img class="avatar ${cls}" src="${esc(safeUrl(url))}" alt="${esc(name)}" referrerpolicy="no-referrer"
                         onerror="this.outerHTML='<div class=\\'avatar ${cls}\\' style=\\'background:${colorFor(name)}\\'>${esc(initials(name))}</div>'" />`;
   return `<div class="avatar ${cls}" style="background:${colorFor(name)}">${esc(initials(name))}</div>`;
 }
@@ -82,8 +89,119 @@ document.getElementById('modal-close').onclick = closeModal;
 modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
 function closeModal() { modal.hidden = true; modalBody.innerHTML = ''; }
 
+// ---------------------------------------------------------------- login (hosted)
+// Browse anonymously; any write requires signing in (Google / email / phone), which binds this
+// browser's session agent to a recoverable Hi identity. Returns true if it intercepted (= not
+// signed in yet, login modal opened), false if the caller may proceed.
+function gateWrite(retry) {
+  if (!HOSTED || SESSION.logged_in) return false;
+  openLogin(retry);
+  return true;
+}
+
+function onLoginSuccess(res, onDone) {
+  SESSION = { logged_in: true, identity: { email: res.email || null, workspace_id: res.workspace_id || null } };
+  closeModal();
+  toast(res.joined_existing_workspace ? 'Welcome back — your workspace is restored' : 'Signed in to Hi');
+  loadMe().finally(() => { route(); if (typeof onDone === 'function') onDone(); });
+}
+
+function openLogin(onDone) {
+  modalTitle.textContent = 'Sign in to Hi';
+  modalBody.innerHTML = `
+    <p class="muted" style="margin:0 0 12px">Browse all you like. To <b>connect, message or post</b>, sign in — so your
+      conversations are saved and you can pick up on any device.</p>
+    <div class="login-tabs">
+      <button class="login-tab active" data-m="google">Google</button>
+      <button class="login-tab" data-m="email">Email</button>
+      <button class="login-tab" data-m="phone">Phone</button>
+    </div>
+    <div id="login-pane"></div>`;
+  modal.hidden = false;
+  const panes = { google: googlePane, email: emailPane, phone: phonePane };
+  const show = (m) => {
+    modalBody.querySelectorAll('.login-tab').forEach((t) => t.classList.toggle('active', t.dataset.m === m));
+    panes[m]($('#login-pane'), onDone);
+  };
+  modalBody.querySelectorAll('.login-tab').forEach((t) => (t.onclick = () => show(t.dataset.m)));
+  show('google');
+}
+
+function googlePane(c, onDone) {
+  c.innerHTML = `
+    <button class="btn btn-primary btn-block" id="g-go">Continue with Google</button>
+    <div id="g-status" class="login-status muted tiny"></div>`;
+  $('#g-go', c).onclick = async () => {
+    const st = $('#g-status', c); st.textContent = 'Opening Google…';
+    let r;
+    try { r = await hi('hi.google-link', 'start'); } catch (e) { st.textContent = 'Could not start: ' + e.message; return; }
+    const url = safeUrl(r.verification_url);
+    if (url === '#') { st.textContent = 'Got an invalid sign-in URL — try again.'; return; }
+    const w = window.open(url, 'hi-google', 'noopener,noreferrer,width=500,height=680');
+    st.innerHTML = `A Google window opened — approve there and you'll be signed in automatically.<br>
+      <a href="${esc(url)}" target="_blank" rel="noopener noreferrer">Window blocked? Open sign-in &nearr;</a>`;
+    let tries = 0;
+    const iv = setInterval(async () => {
+      tries++;
+      let res; try { res = await hi('hi.google-link', 'poll'); } catch { res = {}; }
+      if (res && res.status === 'verified') { clearInterval(iv); try { w && w.close(); } catch {} onLoginSuccess(res, onDone); }
+      else if (tries > 72) { clearInterval(iv); st.textContent = 'Timed out — click “Continue with Google” to try again.'; }
+    }, 2500);
+  };
+}
+
+function otpPane(c, onDone, opts) {
+  // opts: { kind:'email'|'phone', cap, field, type, placeholder, label }
+  c.innerHTML = `
+    <input class="login-input" id="otp-id" type="${opts.type}" inputmode="${opts.kind === 'phone' ? 'tel' : 'email'}" placeholder="${opts.placeholder}" />
+    <button class="btn btn-primary btn-block" id="otp-send">${opts.label}</button>
+    <div id="otp-step2" hidden>
+      <input class="login-input" id="otp-code" inputmode="numeric" maxlength="6" placeholder="6-digit code" />
+      <button class="btn btn-primary btn-block" id="otp-verify">Verify &amp; sign in</button>
+    </div>
+    <div id="otp-status" class="login-status muted tiny"></div>`;
+  const st = $('#otp-status', c);
+  $('#otp-send', c).onclick = async () => {
+    const val = $('#otp-id', c).value.trim();
+    if (!val) return (st.textContent = `Enter your ${opts.kind}.`);
+    st.textContent = 'Sending code…';
+    try {
+      await hi(opts.cap, 'bind', { [opts.field]: val });
+      $('#otp-step2', c).hidden = false;
+      st.textContent = `We sent a 6-digit code to ${val}. Enter it above.`;
+    } catch (e) { st.textContent = 'Could not send: ' + e.message; }
+  };
+  $('#otp-verify', c).onclick = async () => {
+    const val = $('#otp-id', c).value.trim();
+    const code = $('#otp-code', c).value.trim();
+    if (!/^\d{4,8}$/.test(code)) return (st.textContent = 'Enter the code from your ' + opts.kind + '.');
+    st.textContent = 'Verifying…';
+    try {
+      const res = await hi(opts.cap, 'verify', { [opts.field]: val, code });
+      if (res.workspace_id) onLoginSuccess(res, onDone);
+      else st.textContent = 'That code didn’t work — try again.';
+    } catch (e) { st.textContent = 'Verification failed: ' + e.message; }
+  };
+}
+const emailPane = (c, onDone) => otpPane(c, onDone, { kind: 'email', cap: 'hi.email-binding', field: 'email', type: 'email', placeholder: 'you@email.com', label: 'Email me a code' });
+const phonePane = (c, onDone) => otpPane(c, onDone, { kind: 'phone', cap: 'hi.phone-binding', field: 'phone_e164', type: 'tel', placeholder: '+1 415 555 0152', label: 'Text me a code' });
+
+// Shown on Me / Messaging when browsing anonymously in the hosted app.
+function renderSignInPrompt(what) {
+  app.innerHTML = `<div class="grid-2">
+    <div class="col"><div class="card empty">
+      <div class="big">Sign in to see ${esc(what)}</div>
+      <p class="muted" style="max-width:420px;margin:6px auto 16px">Browsing is open to everyone. Sign in with Google,
+        email or phone to act as yourself — your profile, listings and conversations are saved and come back on any device.</p>
+      <button class="btn btn-primary" data-login>Sign in to Hi</button>
+    </div></div>
+    <div class="col">${rightRail()}</div>
+  </div>`;
+}
+
 // Reach out to an owner — opens a compose box and sends via hi.pairings.contact_owner.
 function openCompose(person, listingId) {
+  if (gateWrite(() => openCompose(person, listingId))) return;
   const name = person.display_name || 'this member';
   const pubId = person.owner_public_id || publicIdFromUrl(person.owner_public_url);
   modalTitle.textContent = `Message ${name}`;
@@ -121,6 +239,7 @@ function openCompose(person, listingId) {
 
 // Compose a "post" = publish a listing of what you're looking for.
 function openPost() {
+  if (gateWrite(() => openPost())) return;
   modalTitle.textContent = 'Start a post';
   modalBody.innerHTML = `
     <textarea id="post-text" placeholder="What are you looking for? e.g. “Hiring two senior Go engineers in Tokyo” or “Looking to meet AI founders in SF”."></textarea>
@@ -149,15 +268,21 @@ function openPost() {
 let ME = null; // workspace-overview result, fetched once
 
 function railProfileCard() {
-  const name = ME?.current_name || 'You on Hirey';
+  const signedIn = !HOSTED || SESSION.logged_in;
+  const name = ME?.current_name || (signedIn ? 'You on Hirey' : 'Guest');
+  const sub = signedIn
+    ? esc(SESSION.identity?.email || (ME?.bound ? 'Signed in' : 'Connected identity'))
+    : 'Browsing anonymously';
   return `<div class="card profile-card">
     <div class="cover"></div>
     <div class="body">
       <a href="#/me">${avatar(null, name, 'lg avatar')}</a>
       <h2><a href="#/me">${esc(name)}</a></h2>
-      <div class="muted tiny">${esc(ME?.bound ? 'Connected identity' : 'Anonymous Hi agent')}</div>
+      <div class="muted tiny">${sub}</div>
     </div>
-    <div class="rail-stat"><span>Agents in workspace</span><b>${ME?.agents?.length ?? '–'}</b></div>
+    ${signedIn
+      ? `<div class="rail-stat"><span>Agents in workspace</span><b>${ME?.agents?.length ?? '–'}</b></div>`
+      : `<button class="rail-link" data-login style="width:100%;text-align:left;background:none;border:0;border-top:1px solid var(--line);font:inherit;color:var(--blue);cursor:pointer">Sign in to act →</button>`}
     <a class="rail-link" href="#/network">Grow your network →</a>
   </div>`;
 }
@@ -345,9 +470,9 @@ async function viewProfile(pubId) {
   const name = prof.display_name || 'Hirey member';
   const person = { display_name: name, headline: prof.headline, avatar_url: prof.avatar_url, owner_public_id: Number(pubId) };
   const links = [];
-  if (prof.linkedin_url) links.push(`<a class="btn btn-ghost btn-sm" href="${esc(prof.linkedin_url)}" target="_blank" rel="noopener">in LinkedIn</a>`);
-  if (prof.website_url) links.push(`<a class="btn btn-ghost btn-sm" href="${esc(prof.website_url)}" target="_blank" rel="noopener">🔗 Website</a>`);
-  if (prof.twitter_handle) links.push(`<a class="btn btn-ghost btn-sm" href="https://twitter.com/${esc(prof.twitter_handle)}" target="_blank" rel="noopener">𝕏 ${esc(prof.twitter_handle)}</a>`);
+  if (prof.linkedin_url) links.push(`<a class="btn btn-ghost btn-sm" href="${esc(safeUrl(prof.linkedin_url))}" target="_blank" rel="noopener noreferrer">in LinkedIn</a>`);
+  if (prof.website_url) links.push(`<a class="btn btn-ghost btn-sm" href="${esc(safeUrl(prof.website_url))}" target="_blank" rel="noopener noreferrer">🔗 Website</a>`);
+  if (prof.twitter_handle) links.push(`<a class="btn btn-ghost btn-sm" href="${esc(safeUrl('https://twitter.com/' + encodeURIComponent(prof.twitter_handle)))}" target="_blank" rel="noopener noreferrer">𝕏 ${esc(prof.twitter_handle)}</a>`);
 
   app.innerHTML = `<div class="grid-2">
     <div class="col">
@@ -385,6 +510,7 @@ async function viewProfile(pubId) {
 }
 
 async function viewMessaging() {
+  if (HOSTED && !SESSION.logged_in) return renderSignInPrompt('your messages');
   app.innerHTML = `<div class="card"><div class="msg-wrap">
     <div class="thread-list" id="threads"><div class="loading">Loading…</div></div>
     <div class="thread-pane" id="pane"><div class="empty">Select a conversation</div></div>
@@ -428,6 +554,7 @@ async function viewMessaging() {
 }
 
 async function viewMe() {
+  if (HOSTED && !SESSION.logged_in) return renderSignInPrompt('your profile & workspace');
   app.innerHTML = `<div class="grid-2"><div class="col"><div class="loading">Loading your workspace…</div></div><div class="col">${rightRail()}</div></div>`;
   let r;
   try { r = await hi('hi.workspace-overview', 'get'); } catch (e) { app.innerHTML = `<div class="card empty">${esc(e.message)}</div>`; return; }
@@ -503,10 +630,19 @@ document.getElementById('nav-search').addEventListener('submit', (e) => {
 
 window.addEventListener('hashchange', route);
 
-// Boot: learn the mode. In hosted (multi-tenant) mode we do NOT auto-resolve an identity —
-// a per-session agent is provisioned lazily only when the visitor acts (Me / Messaging / write).
+// any element with a [data-login] attribute opens the sign-in modal
+document.addEventListener('click', (e) => {
+  const t = e.target.closest('[data-login]');
+  if (t) { e.preventDefault(); openLogin(() => route()); }
+});
+
+// Boot: learn the mode + (hosted) the login state. In hosted mode browsing is anonymous; an
+// identity is only resolved once the visitor has signed in (Google / email / phone).
 (async () => {
   try { HOSTED = (await (await fetch(api('api/health'))).json()).hosted === true; } catch { /* default local */ }
-  if (!HOSTED) await loadMe().catch(() => {});
+  if (HOSTED) {
+    try { SESSION = await (await fetch(api('api/session'))).json(); } catch { /* logged_in stays false */ }
+  }
+  if (!HOSTED || SESSION.logged_in) await loadMe().catch(() => {});
   route();
 })();

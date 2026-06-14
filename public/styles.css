@@ -221,6 +221,15 @@ button { font-family: inherit; cursor: pointer; }
 }
 .modal-body .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 
+/* login modal */
+.login-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+.login-tab { flex: 1; padding: 8px; border-radius: 8px; border: 1px solid var(--line); background: #fff; font-weight: 600; font-size: 13px; color: var(--ink-2); }
+.login-tab.active { background: #eef3f8; color: var(--blue-dark); border-color: var(--blue); }
+.login-input { width: 100%; border: 1px solid #b0b0b0; border-radius: 8px; padding: 11px 12px; font-family: inherit; font-size: 15px; margin-bottom: 10px; }
+.btn-block { width: 100%; }
+.login-status { margin-top: 10px; min-height: 18px; line-height: 1.5; }
+.login-status a { color: var(--blue); font-weight: 600; }
+
 .toast {
   position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
   background: #1d2226; color: #fff; padding: 10px 18px; border-radius: 8px; z-index: 300;

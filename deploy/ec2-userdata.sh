@@ -19,6 +19,7 @@ Wants=network-online.target
 [Service]
 Environment=HOSTED=1
 Environment=PORT=4173
+Environment=ALLOWED_ORIGIN=https://hub.hirey.ai
 WorkingDirectory=/opt/hirey-linkedin
 ExecStart=/usr/bin/node /opt/hirey-linkedin/server.mjs
 Restart=always
