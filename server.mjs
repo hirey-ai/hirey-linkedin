@@ -137,10 +137,14 @@ async function loadServiceCreds() {
 
 let serviceCtx = null;
 
-// Per-session agents (hosted mode). Cookie hl_sid -> AgentCtx, lazily created on first write.
+// Per-browser agents (hosted mode). Cookie hl_sid -> AgentCtx. An agent is minted ONLY when a
+// visitor actually starts signing in (google_link/*-binding) or writes — never on plain browsing,
+// which uses the shared service agent. The cookie is long-lived so a returning browser REUSES its
+// one agent instead of minting a new one each visit; idle/abandoned anonymous agents are reaped by
+// Hi's own idle-agent cleanup. Net: ~1 agent per browser that signs in, not 1 per visit.
 const sessions = new Map();
-const SESSION_TTL = 2 * 60 * 60 * 1000; // 2h idle
-const MAX_SESSIONS = 2000;
+const SESSION_TTL = 30 * 24 * 60 * 60 * 1000; // 30d — reuse one agent per browser across visits
+const MAX_SESSIONS = 20000;
 const SID_RE = /^[a-f0-9]{32}$/;
 const newSid = () => randomBytes(16).toString('hex');
 const sessionCookie = (sid) => `hl_sid=${sid}; Path=/; HttpOnly;${HOSTED ? ' Secure;' : ''} SameSite=Lax; Max-Age=${SESSION_TTL / 1000}`;
