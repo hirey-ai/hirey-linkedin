@@ -1,17 +1,28 @@
 #!/bin/bash
-# EC2 user-data that turns a fresh Amazon Linux 2023 box into a Hirey-Hub demo origin.
-# It runs the demo apps in HOSTED (multi-tenant) mode and lets nginx mount them under /{id}/demo,
-# stripping that prefix before proxying to each node server. TLS is terminated upstream by
-# CloudFront, so nginx only listens on :80 (lock it to the CloudFront prefix list in the SG).
-set -xe
-exec > /var/log/hl-userdata.log 2>&1
-dnf update -y
+# Update an existing Hirey Hub demo origin so /1007/demo serves Hirey VC while
+# the default /{id}/demo route continues to serve Hirey LinkedIn.
+set -euo pipefail
+
+if [[ $EUID -ne 0 ]]; then
+  echo "Run as root, for example: sudo bash deploy/update-demo-origin.sh" >&2
+  exit 1
+fi
+
 dnf install -y nodejs git nginx
 
-git clone --depth 1 https://github.com/hirey-ai/hirey-linkedin /opt/hirey-linkedin
-git clone --depth 1 https://github.com/justfadeaway/hirey-vc /opt/hirey-vc
-chown -R ec2-user:ec2-user /opt/hirey-linkedin
-chown -R ec2-user:ec2-user /opt/hirey-vc
+if [[ ! -d /opt/hirey-linkedin/.git ]]; then
+  git clone --depth 1 https://github.com/hirey-ai/hirey-linkedin /opt/hirey-linkedin
+else
+  git -C /opt/hirey-linkedin pull --ff-only
+fi
+
+if [[ ! -d /opt/hirey-vc/.git ]]; then
+  git clone --depth 1 https://github.com/justfadeaway/hirey-vc /opt/hirey-vc
+else
+  git -C /opt/hirey-vc pull --ff-only
+fi
+
+chown -R ec2-user:ec2-user /opt/hirey-linkedin /opt/hirey-vc
 
 cat >/etc/systemd/system/hirey-linkedin.service <<'UNIT'
 [Unit]
@@ -63,11 +74,9 @@ http {
     listen 80 default_server;
     listen [::]:80 default_server;
     server_name _;
-    absolute_redirect off;            # keep redirects scheme/host-relative (stay on https via CloudFront)
+    absolute_redirect off;
     location = /healthz { default_type text/plain; return 200 'ok'; }
-    # ensure a trailing slash so the SPA's relative URLs resolve under /{id}/demo/
     location ~ ^/[0-9]+/demo$ { return 301 $uri/; }
-    # Hirey VC (Hub app 1007)
     location ~ ^/1007/demo/(?<vc_rest>.*)$ {
       proxy_pass http://127.0.0.1:4175/$vc_rest$is_args$args;
       proxy_http_version 1.1;
@@ -76,7 +85,6 @@ http {
       proxy_set_header X-Forwarded-For $remote_addr;
       proxy_read_timeout 60s;
     }
-    # Default demo app: Hirey LinkedIn.
     location ~ ^/[0-9]+/demo/(?<rest>.*)$ {
       proxy_pass http://127.0.0.1:4173/$rest$is_args$args;
       proxy_http_version 1.1;
@@ -85,15 +93,13 @@ http {
       proxy_set_header X-Forwarded-For $remote_addr;
       proxy_read_timeout 60s;
     }
-    location / { default_type text/plain; return 404 'hirey-linkedin demo origin\n'; }
+    location / { default_type text/plain; return 404 'hirey hub demo origin\n'; }
   }
 }
 NGINX
 
 systemctl daemon-reload
-systemctl enable --now nginx
-systemctl enable --now hirey-linkedin
-systemctl enable --now hirey-vc
-sleep 2
-nginx -t && systemctl reload nginx
-echo "HL_BOOTSTRAP_DONE"
+systemctl enable --now nginx hirey-linkedin hirey-vc
+systemctl restart hirey-linkedin hirey-vc
+nginx -t
+systemctl reload nginx
