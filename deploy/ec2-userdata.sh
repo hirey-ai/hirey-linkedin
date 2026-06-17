@@ -9,8 +9,10 @@ dnf update -y
 dnf install -y nodejs git nginx
 
 git clone --depth 1 https://github.com/hirey-ai/hirey-linkedin /opt/hirey-linkedin
+git clone --depth 1 https://github.com/hirey-ai/hirey-tasks /opt/hirey-tasks
 git clone --depth 1 https://github.com/justfadeaway/hirey-vc /opt/hirey-vc
 chown -R ec2-user:ec2-user /opt/hirey-linkedin
+chown -R ec2-user:ec2-user /opt/hirey-tasks
 chown -R ec2-user:ec2-user /opt/hirey-vc
 
 cat >/etc/systemd/system/hirey-linkedin.service <<'UNIT'
@@ -24,6 +26,24 @@ Environment=PORT=4173
 Environment=ALLOWED_ORIGIN=https://hub.hirey.ai
 WorkingDirectory=/opt/hirey-linkedin
 ExecStart=/usr/bin/node /opt/hirey-linkedin/server.mjs
+Restart=always
+RestartSec=3
+User=ec2-user
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+cat >/etc/systemd/system/hirey-tasks.service <<'UNIT'
+[Unit]
+Description=Hirey Tasks demo (hosted, multi-tenant)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Environment=HOSTED=1
+Environment=PORT=4174
+Environment=ALLOWED_ORIGIN=https://hub.hirey.ai
+WorkingDirectory=/opt/hirey-tasks
+ExecStart=/usr/bin/node /opt/hirey-tasks/server.mjs
 Restart=always
 RestartSec=3
 User=ec2-user
@@ -67,6 +87,15 @@ http {
     location = /healthz { default_type text/plain; return 200 'ok'; }
     # ensure a trailing slash so the SPA's relative URLs resolve under /{id}/demo/
     location ~ ^/[0-9]+/demo$ { return 301 $uri/; }
+    # Hirey Tasks (Hub app 1011)
+    location ~ ^/1011/demo/(?<tasks_rest>.*)$ {
+      proxy_pass http://127.0.0.1:4174/$tasks_rest$is_args$args;
+      proxy_http_version 1.1;
+      proxy_set_header Host $host;
+      proxy_set_header X-Forwarded-Proto https;
+      proxy_set_header X-Forwarded-For $remote_addr;
+      proxy_read_timeout 60s;
+    }
     # Hirey VC (Hub app 1007)
     location ~ ^/1007/demo/(?<vc_rest>.*)$ {
       proxy_pass http://127.0.0.1:4175/$vc_rest$is_args$args;
@@ -93,6 +122,7 @@ NGINX
 systemctl daemon-reload
 systemctl enable --now nginx
 systemctl enable --now hirey-linkedin
+systemctl enable --now hirey-tasks
 systemctl enable --now hirey-vc
 sleep 2
 nginx -t && systemctl reload nginx

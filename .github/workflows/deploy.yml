@@ -38,7 +38,7 @@ jobs:
             --instance-ids "$INSTANCE_ID" \
             --document-name AWS-RunShellScript \
             --comment "GHA deploy ${GITHUB_SHA::7}" \
-            --parameters '{"commands":["set -euo pipefail","export HOME=/root","git config --system --replace-all safe.directory /opt/hirey-linkedin","git config --system --add safe.directory /opt/hirey-vc","cd /opt/hirey-linkedin","git pull --ff-only","bash deploy/update-demo-origin.sh","echo SSM_DEPLOY_OK"]}' \
+            --parameters '{"commands":["set -euo pipefail","export HOME=/root","git config --system --replace-all safe.directory /opt/hirey-linkedin","git config --system --add safe.directory /opt/hirey-tasks","git config --system --add safe.directory /opt/hirey-vc","cd /opt/hirey-linkedin","git pull --ff-only","bash deploy/update-demo-origin.sh","echo SSM_DEPLOY_OK"]}' \
             --query Command.CommandId --output text)
           echo "CommandId=$CMD_ID"
           STATUS=Pending
@@ -60,15 +60,22 @@ jobs:
       - name: Verify live demo
         run: |
           set -euo pipefail
-          vc=""
-          for i in $(seq 1 6); do
-            vc=$(curl -fsS -m 25 https://hub.hirey.ai/1007/demo/ | grep -oiE '<title>[^<]*</title>' | head -1 || true)
-            echo "[$i] 1007/demo -> ${vc:-<none>}"
-            echo "$vc" | grep -qi 'Hirey VC' && break
-            sleep 5
-          done
-          li=$(curl -fsS -m 25 https://hub.hirey.ai/1005/demo/ | grep -oiE '<title>[^<]*</title>' | head -1 || true)
-          echo "1005/demo -> ${li:-<none>}"
-          echo "$vc" | grep -qi 'Hirey VC' || { echo "::error::/1007/demo did not return Hirey VC"; exit 1; }
-          echo "$li" | grep -qi 'professional network' || { echo "::error::/1005/demo no longer returns Hirey LinkedIn"; exit 1; }
-          echo "Live demo verified: 1007=VC, 1005=LinkedIn"
+          # Grep the whole page body (titles may carry attributes), retry for restart.
+          check() {  # $1=id  $2=needle
+            local body=""
+            for i in $(seq 1 6); do
+              body=$(curl -fsS -m 25 "https://hub.hirey.ai/$1/demo/" || true)
+              if printf '%s' "$body" | grep -qi "$2"; then
+                echo "  $1/demo OK (matched: $2)"
+                return 0
+              fi
+              echo "  [$i] $1/demo not ready (want: $2)"
+              sleep 5
+            done
+            echo "::error::/$1/demo did not contain '$2'"
+            return 1
+          }
+          check 1005 'professional network'   # Hirey LinkedIn (default)
+          check 1007 'Hirey VC'               # Hirey VC
+          check 1011 'Hirey Tasks'            # Hirey Tasks
+          echo "Live demo verified: 1005=LinkedIn, 1007=VC, 1011=Tasks"
